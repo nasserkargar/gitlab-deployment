@@ -1,0 +1,134 @@
+Step 1 — Creating the GitLab Repository
+---------------------------------------
+--> new project
+--> create new file (index.html)
+<html>
+<body>
+<h1>My Personal Website</h1>
+</body>
+</html>
+
+--> Click Commit changes
+--> create a Dockerfile to copy the HTML file into an Nginx image
+# nano Dockerfile
+FROM nginx:1.18
+COPY index.html /usr/share/nginx/html
+
+--> Click Commit changes
+
+Step 2 — Registering a GitLab Runner
+------------------------------------
+sudo gitlab-runner register -n --url https://your_gitlab.com --registration-token project_token --executor docker --description "Deployment Runner" --docker-image "docker:stable" --tag-list deployment --docker-privileged
+
+
+Step 3 — Creating a Deployment User
+-----------------------------------
+You are going to create a user that is dedicated for the deployment task. You will later configure the CI/CD pipeline 
+to log in to the server with that user.
+
+# sudo adduser deployer
+# sudo usermod -aG docker deployer
+
+Step 4 — Setting Up an SSH Key
+------------------------------
+# su deployer
+$ ssh-keygen -b 4096
+$ cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+
+*** In this step you have created an SSH key pair for the CI/CD pipeline to log in and deploy the application. 
+*** Next you’ll store the private key in GitLab to make it accessible during the pipeline process.
+
+Step 5 — Storing the Private Key in a GitLab CI/CD Variable
+-----------------------------------------------------------
+*** When GitLab creates a CI/CD pipeline, it will send all variables to the corresponding runner and the variables 
+*** will be set as environment variables for the duration of the job.
+*** In particular, the values of file variables are stored in a file and the environment variable will contain 
+*** the path to this file.
+
+$ cat ~/.ssh/id_rsa
+*** Copy the output to your clipboard. Make sure to add a linebreak after -----END RSA PRIVATE KEY-----
+Now navigate to Settings > CI / CD > Variables in your GitLab project and click Add Variable. Fill out the form as follows:
+
+    Key: ID_RSA
+    Value: Paste your SSH private key from your clipboard (including a line break at the end).
+    Type: File
+    Environment Scope: All (default)
+    Protect variable: Checked
+    Mask variable: Unchecked
+
+Create another variable with your server IP. Click Add Variable and fill out the form as follows:
+
+    Key: SERVER_IP
+    Value: your_server_IP
+    Type: Variable
+    Environment scope: All (default)
+    Protect variable: Checked
+    Mask variable: Checked
+
+Finally, create a variable with the login user. Click Add Variable and fill out the form as follows:
+
+    Key: SERVER_USER
+    Value: deployer
+    Type: Variable
+    Environment scope: All (default)
+    Protect variable: Checked
+    Mask variable: Checked
+
+Step 6 — Configuring the .gitlab-ci.yml File
+--------------------------------------------
+*** Docker image name has to follow this scheme
+*** $CI_REGISTRY_IMAGE represents the <registry URL>/<namespace>/<project> part and is mandatory because 
+*** it is the project’s registry root
+*** $CI_COMMIT_REF_NAME is optional but useful to host Docker images for different branches.
+*** repository name levels
+*** registry.example.com/group/project:some-tag
+*** registry.example.com/group/project/image:latest
+*** registry.example.com/group/project/my/image:rc1
+(For your TAG_COMMIT variable you used the second option, where image will be replaced with the branch name.)
+
+*** $CI_REGISTRY_IMAGE  is equal to $NEXUS_REPO
+
+# nano .gitlab-ci.yml
+stages:
+  - publish
+  - deploy
+variables:
+  TAG_LATEST: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_NAME:latest
+  TAG_COMMIT: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_NAME:$CI_COMMIT_SHORT_SHA
+
+publish:
+  image: docker:latest
+  stage: publish
+  services:
+    - docker:dind
+  script:
+    - docker build -t $TAG_COMMIT -t $TAG_LATEST .
+    - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN $CI_REGISTRY
+    - docker push $TAG_COMMIT
+    - docker push $TAG_LATEST
+
+deploy:
+  image: alpine:latest
+  stage: deploy
+  tags:
+    - deployment
+  script:
+    - chmod og= $ID_RSA
+    - apk update && apk add openssh-client
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_IP "docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN $CI_REGISTRY"
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_IP "docker pull $TAG_COMMIT"
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_IP "docker container rm -f my-app || true"
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_IP "docker run -d -p 80:80 --name my-app $TAG_COMMIT"
+  environment:
+    name: production
+    url: http://your_server_IP
+  only:
+    - master
+
+--> Finally click Commit changes
+
+Step 7 — Validating the Deployment
+----------------------------------
+
+
+
